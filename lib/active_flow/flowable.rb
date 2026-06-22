@@ -7,6 +7,7 @@ module ActiveFlow
     included do
       class_attribute :_flow_fields, default: []
       class_attribute :_flow_connections, default: []
+      class_attribute :_flow_scopes, default: {}
     end
 
     class_methods do
@@ -23,11 +24,17 @@ module ActiveFlow
       end
 
       # Marks all AR columns as flow_fields, optionally excluding some.
-      def flow_model(except: [])
+      def flow_all_attributes(except: [])
         except = Array(except).map(&:to_sym)
         column_names.map(&:to_sym).reject { |c| except.include?(c) }.each do |col|
           flow_field col
         end
+      end
+
+      def flow_scope(name, fields: [], connections: [])
+        self._flow_scopes = _flow_scopes.merge(
+          name.to_sym => ScopeDefinition.new(name, fields: fields, connections: connections)
+        )
       end
 
       # Marks all AR associations as flow_connections, optionally excluding some.
@@ -42,10 +49,6 @@ module ActiveFlow
 
       def flow_node_type
         model_name.singular
-      end
-
-      def flow_includes
-        _flow_connections.map(&:name)
       end
     end
   end

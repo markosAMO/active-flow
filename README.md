@@ -6,10 +6,11 @@ ActiveFlow es una gema Ruby que proporciona un DSL para marcar modelos ActiveRec
 
 - [Instalación](#instalación)
 - [Configuración](#configuración)
+- [Registro de recursos](#registro-de-recursos)
 - [Módulo Flowable](#módulo-flowable)
   - [flow_field](#flow_field)
   - [flow_connection](#flow_connection)
-  - [flow_model](#flow_model)
+  - [flow_all_attributes](#flow_all_attributes)
   - [flow_all_connections](#flow_all_connections)
   - [Helpers de clase](#helpers-de-clase)
 - [Serializador](#serializador)
@@ -55,6 +56,81 @@ end
 
 ---
 
+## Registro de recursos
+
+ActiveFlow puede generar controladores CRUD automáticamente para cualquier modelo anotado con `Flowable`, de forma similar a Active Admin.
+
+### Setup
+
+Creá un archivo por modelo en `app/flow/`:
+
+```ruby
+# app/flow/project_flow.rb
+ActiveFlow.register Project do
+  scope :summary  # scope por defecto para serializar, opcional
+end
+```
+
+Montá las rutas en `config/routes.rb`:
+
+```ruby
+Rails.application.routes.draw do
+  active_flow_routes              # monta en /flow
+  active_flow_routes path: "api"  # o con path custom → /api
+end
+```
+
+### Rutas generadas
+
+Para cada modelo registrado se generan 5 rutas RESTful bajo el path configurado:
+
+```
+GET    /flow/projects          → index
+GET    /flow/projects/:id      → show
+POST   /flow/projects          → create
+PATCH  /flow/projects/:id      → update
+DELETE /flow/projects/:id      → destroy
+```
+
+### Respuestas JSON
+
+| Acción    | Formato de respuesta |
+|-----------|----------------------|
+| `index`   | `{ nodes: [...], edges: [] }` |
+| `show`    | `{ nodes: [...], edges: [...] }` con conexiones |
+| `create`  | registro creado serializado, status `201` |
+| `update`  | registro actualizado serializado, status `200` |
+| `destroy` | sin body, status `204` |
+
+En caso de error de validación (`create` / `update`):
+
+```json
+{ "errors": { "name": ["can't be blank"] } }
+```
+
+### Permitted params
+
+Los parámetros permitidos se derivan automáticamente de los `flow_field` declarados en el modelo, excluyendo `:id`. Los params deben llegar anidados bajo la clave del modelo:
+
+```json
+{ "project": { "name": "Alpha", "status": "active" } }
+```
+
+### Controller base
+
+El controller generado hereda de `ActiveFlow::ResourceController < ActionController::API`. Si necesitás autenticación u otros concerns, podés abrir el controller generado en tu app:
+
+```ruby
+# app/controllers/active_flow/projects_controller.rb
+module ActiveFlow
+  class ProjectsController < ActiveFlow::ResourceController
+    before_action :authenticate_user!
+  end
+end
+```
+
+---
+
 ## Módulo Flowable
 
 `ActiveFlow::Flowable` es un `ActiveSupport::Concern` que expone el DSL. Inclúyelo en el modelo que quieras serializar:
@@ -97,13 +173,50 @@ flow_connection :has_one,     :config
 | `model_relation_type` | Tipo de asociación AR: `:has_many`, `:belongs_to`, `:has_one`, `:has_and_belongs_to_many`. |
 | `*names`  | Nombres de la asociación tal como están definidos en el modelo. |
 
-### `flow_model`
+### `flow_all_attributes`
 
 Atajo que registra **todas las columnas** de la tabla como `flow_field`, con posibilidad de excluir algunas.
 
 ```ruby
-flow_model                         # todas las columnas
-flow_model except: [:created_at, :updated_at]
+flow_all_attributes                         # todas las columnas
+flow_all_attributes except: [:created_at, :updated_at]
+```
+
+### `flow_scope`
+
+Define una agrupación nombrada de campos y relaciones ya declarados como `flow_field` y `flow_connection`. Al serializar con ese scope, solo se incluyen los campos y relaciones del grupo.
+
+```ruby
+flow_field :id, :name, :status, :priority, :budget, :description
+flow_connection :has_many, :tasks
+flow_connection :belongs_to, :owner
+
+flow_scope :summary,  fields: [:id, :name, :status]
+flow_scope :detailed, fields: [:id, :name, :status, :priority, :budget], connections: [:tasks, :owner]
+```
+
+Cada scope puede declarar `fields:` y/o `connections:`. Ambos son opcionales, pero si no se declara `connections:` el scope no serializa ninguna relación — el scope es explícito por diseño.
+
+Los scopes se pasan al serializar:
+
+```ruby
+ActiveFlow::Serializer.serialize(project, scope: :summary)
+# solo fields: id, name, status — sin edges
+
+ActiveFlow::Serializer.serialize(project, scope: :detailed)
+# fields: id, name, status, priority, budget + edges hacia tasks y owner
+
+ActiveFlow::Serializer.to_service_json(project, scope: :summary)
+```
+
+Se lanza `ArgumentError` en dos situaciones:
+
+```
+# El scope no existe en el modelo
+Scope :foo is not defined on Project
+
+# Una connection del scope no está declarada como flow_connection
+Connection :comments in scope :detailed is not declared as flow_connection on Project
 ```
 
 ### `flow_all_connections`
@@ -122,16 +235,9 @@ Estos métodos son generados automáticamente al incluir `Flowable`:
 | Método              | Retorna                                                         |
 |---------------------|-----------------------------------------------------------------|
 | `flow_node_type`    | `String` — nombre singular del modelo (e.g. `"project"`).     |
-| `flow_includes`     | `Array<Symbol>` — nombres de conexiones, útil para `.includes`. |
 | `_flow_fields`      | `Array<FieldDefinition>` — campos registrados.                 |
 | `_flow_connections` | `Array<ConnectionDefinition>` — conexiones registradas.        |
-
-`flow_includes` es especialmente útil para hacer eager loading antes de serializar:
-
-```ruby
-projects = Project.includes(Project.flow_includes).all
-ActiveFlow::Serializer.serialize(projects)
-```
+| `_flow_scopes`      | `Hash<Symbol, ScopeDefinition>` — scopes registrados.          |
 
 ---
 
@@ -144,7 +250,7 @@ ActiveFlow::Serializer.serialize(projects)
 Genera el formato `{ nodes: [...], edges: [...] }` compatible directamente con React Flow.
 
 ```ruby
-project = Project.includes(Project.flow_includes).find(1)
+project = Project.find(1)
 
 ActiveFlow::Serializer.serialize(project)
 # =>
@@ -318,7 +424,7 @@ class Project < ApplicationRecord
   has_many :tasks
   has_one  :owner, class_name: "User"
 
-  flow_model except: [:created_at, :updated_at]
+  flow_all_attributes except: [:created_at, :updated_at]
   flow_all_connections except: [:audits]
 end
 ```
@@ -329,17 +435,16 @@ end
 # app/controllers/api/projects_controller.rb
 class Api::ProjectsController < ApplicationController
   def show
-    project = Project.includes(Project.flow_includes).find(params[:id])
+    project = Project.find(params[:id])
     render json: ActiveFlow::Serializer.serialize(project)
   end
 
   def index
-    projects = Project.includes(Project.flow_includes).all
-    render json: ActiveFlow::Serializer.serialize(projects)
+    render json: ActiveFlow::Serializer.serialize(Project.all)
   end
 
   def service_data
-    project = Project.includes(Project.flow_includes).find(params[:id])
+    project = Project.find(params[:id])
     render json: ActiveFlow::Serializer.to_service_json(project)
   end
 

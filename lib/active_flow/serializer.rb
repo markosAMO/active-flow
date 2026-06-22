@@ -2,20 +2,21 @@
 
 module ActiveFlow
   class Serializer
-    def self.serialize(subject)
-      new(subject).serialize
+    def self.serialize(subject, scope: nil)
+      new(subject, scope: scope).serialize
     end
 
-    def self.to_service_json(subject)
-      new(subject).to_service_json
+    def self.to_service_json(subject, scope: nil)
+      new(subject, scope: scope).to_service_json
     end
 
     def self.to_schema(klass)
       new(klass).to_schema
     end
 
-    def initialize(subject)
+    def initialize(subject, scope: nil)
       @subject = subject
+      @scope   = scope&.to_sym
     end
 
     # React Flow format: { nodes: [...], edges: [...] }
@@ -62,6 +63,33 @@ module ActiveFlow
 
     private
 
+    def resolve_fields(klass)
+      return klass._flow_fields unless @scope
+
+      scope_def = klass._flow_scopes[@scope]
+      raise ArgumentError, "Scope :#{@scope} is not defined on #{klass.name}" unless scope_def
+
+      klass._flow_fields.select { |f| scope_def.fields.include?(f.name) }
+    end
+
+    def resolve_connections(klass)
+      return klass._flow_connections unless @scope
+
+      scope_def = klass._flow_scopes[@scope]
+      raise ArgumentError, "Scope :#{@scope} is not defined on #{klass.name}" unless scope_def
+
+      return [] if scope_def.connections.empty?
+
+      declared_names = klass._flow_connections.map(&:name)
+      scope_def.connections.each do |conn_name|
+        unless declared_names.include?(conn_name)
+          raise ArgumentError, "Connection :#{conn_name} in scope :#{@scope} is not declared as flow_connection on #{klass.name}"
+        end
+      end
+
+      klass._flow_connections.select { |c| scope_def.connections.include?(c.name) }
+    end
+
     def collection?
       @subject.is_a?(ActiveRecord::Relation) || @subject.is_a?(Array)
     end
@@ -78,7 +106,7 @@ module ActiveFlow
       main_node = build_node(record)
       nodes << main_node
 
-      record.class._flow_connections.each do |connection|
+      resolve_connections(record.class).each do |connection|
         associated = record.public_send(connection.name)
         associated = [associated].compact unless associated.respond_to?(:each)
 
@@ -96,8 +124,10 @@ module ActiveFlow
       klass     = record.class
       node_type = klass.respond_to?(:flow_node_type) ? klass.flow_node_type : klass.name.underscore
 
-      data = if klass.respond_to?(:_flow_fields) && klass._flow_fields.any?
-               klass._flow_fields.each_with_object({ id: record.id }) do |field, hash|
+      fields = klass.respond_to?(:_flow_fields) ? resolve_fields(klass) : []
+
+      data = if fields.any?
+               fields.each_with_object({ id: record.id }) do |field, hash|
                  hash[field.name] = record.public_send(field.name)
                end
              else
@@ -119,11 +149,11 @@ module ActiveFlow
     def build_service_hash(record)
       klass = record.class
 
-      hash = klass._flow_fields.each_with_object({ id: record.id }) do |field, h|
+      hash = resolve_fields(klass).each_with_object({ id: record.id }) do |field, h|
         h[field.name] = record.public_send(field.name)
       end
 
-      klass._flow_connections.each do |connection|
+      resolve_connections(klass).each do |connection|
         associated = record.public_send(connection.name)
         plural     = %i[has_many has_and_belongs_to_many].include?(connection.model_relation_type)
 
