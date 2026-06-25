@@ -8,7 +8,23 @@ module ActiveFlow
     end
 
     def index
-      render json: Serializer.to_service_json(resource_class.all, scope: flow_scope)
+      return render json: Serializer.to_service_json(resource_class.all, scope: flow_scope) unless params[:page].present? && params[:page_size].present?
+
+      page       = params[:page].to_i
+      page_size  = params[:page_size].to_i
+      base_scope = resource_class.all
+      total      = base_scope.count
+      records    = base_scope.offset((page - 1) * page_size).limit(page_size)
+
+      render json: {
+        data: Serializer.to_service_json(records, scope: flow_scope),
+        meta: {
+          page:        page,
+          page_size:   page_size,
+          total:       total,
+          total_pages: (total.to_f / page_size).ceil
+        }
+      }
     end
 
     def show

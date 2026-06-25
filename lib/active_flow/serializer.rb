@@ -164,7 +164,7 @@ module ActiveFlow
                                 end
       end
 
-      { klass.flow_node_type.to_sym => hash }
+      hash
     end
 
     def build_assoc_hash(record)

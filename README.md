@@ -62,6 +62,8 @@ end
 
 ActiveFlow puede generar controladores CRUD automáticamente para cualquier modelo anotado con `Flowable`, de forma similar a Active Admin.
 
+> **Nota:** los cambios en el DSL del modelo (`flow_field`, `flow_connection`, `flow_scope`) requieren reiniciar el servidor para ser tomados. Esto ocurre porque `ActiveFlow.resources` se construye al momento del boot y memoiza el modelo. Active Admin tiene el mismo comportamiento.
+
 ### Setup
 
 Creá los archivos de registro en `app/flow/`. Podés tener un archivo por modelo o uno solo con todos los registros:
@@ -115,13 +117,14 @@ Las rutas se generan **automáticamente** al bootear — no necesitás tocar `ro
 
 ### Rutas generadas
 
-Para cada modelo registrado se generan 5 rutas RESTful bajo su namespace:
+Para cada modelo registrado se generan las rutas RESTful estándar bajo su namespace, **excepto `new` y `edit`** (que sirven para renderizar formularios HTML — no tienen sentido en una API):
 
 ```
 GET    /api/v1/projects          → index
-GET    /api/v1/projects/:id      → show
 POST   /api/v1/projects          → create
+GET    /api/v1/projects/:id      → show
 PATCH  /api/v1/projects/:id      → update
+PUT    /api/v1/projects/:id      → update
 DELETE /api/v1/projects/:id      → destroy
 ```
 
@@ -129,7 +132,7 @@ DELETE /api/v1/projects/:id      → destroy
 
 | Acción    | Formato de respuesta |
 |-----------|----------------------|
-| `index`   | array de objetos JSON planos |
+| `index`   | array de objetos JSON planos (o paginado, ver abajo) |
 | `show`    | objeto JSON plano con relaciones anidadas |
 | `create`  | registro creado serializado, status `201` |
 | `update`  | registro actualizado serializado, status `200` |
@@ -143,12 +146,52 @@ En caso de error de validación (`create` / `update`):
 { "errors": { "name": ["can't be blank"] } }
 ```
 
+### Paginado
+
+El `index` soporta paginado opcional. Si el request incluye los params `page` y `page_size`, la respuesta cambia de formato:
+
+```
+GET /api/v1/projects?page=1&page_size=25
+```
+
+```json
+{
+  "data": [
+    { "id": 1, "name": "Alpha" },
+    { "id": 2, "name": "Beta" }
+  ],
+  "meta": {
+    "page": 1,
+    "page_size": 25,
+    "total": 80,
+    "total_pages": 4
+  }
+}
+```
+
+Si ninguno de los dos params está presente, el `index` devuelve el array plano sin wrapper — comportamiento por defecto sin cambios.
+
 ### Permitted params
 
-Los parámetros permitidos se derivan automáticamente de los `flow_field` declarados en el modelo, excluyendo `:id`. Los params deben llegar anidados bajo la clave del modelo:
+Los parámetros permitidos se derivan automáticamente de los `flow_field` declarados en el modelo, **filtrando solo los que corresponden a columnas reales de la base de datos** y excluyendo `:id`. Los params deben llegar anidados bajo la clave del modelo:
 
 ```json
 { "project": { "name": "Alpha", "status": "active" } }
+```
+
+Esto significa que podés declarar métodos calculados en `flow_field` sin riesgo — aparecen en la respuesta pero nunca en el whitelist de escritura:
+
+```ruby
+class Project < ApplicationRecord
+  include ActiveFlow::Flowable
+
+  def display_name
+    "#{code} — #{name}"
+  end
+
+  flow_field :id, :name, :status   # columnas → aparecen en respuesta + permitted_params
+  flow_field :display_name         # método → aparece en respuesta, excluido de permitted_params
+end
 ```
 
 ### Controller base
@@ -214,12 +257,14 @@ flow_field :metadata, type: :json
 
 | Argumento | Descripción |
 |-----------|-------------|
-| `*names`  | Uno o más nombres de columnas (Symbol o String). |
-| `type:`   | Tipo explícito del campo. Si se omite, se infiere desde `columns_hash` de AR. |
+| `*names`  | Nombres de columnas o métodos del modelo (Symbol o String). |
+| `type:`   | Tipo explícito del campo. Si se omite, se infiere desde `columns_hash` de AR (`:unknown` para métodos). |
+
+`flow_field` acepta cualquier método al que el modelo pueda responder — no solo columnas. Los métodos calculados aparecen en la serialización pero quedan automáticamente excluidos de `permitted_params` en el controller.
 
 ### `flow_connection`
 
-Declara una asociación AR como **conexión** (edge en React Flow).
+Declara una relación como **conexión**. A diferencia de `flow_field`, el serializador respeta el DSL del modelo asociado: solo renderiza los `flow_field` declarados en ese modelo, no todos sus atributos.
 
 ```ruby
 flow_connection :has_many,    :tasks
@@ -230,7 +275,15 @@ flow_connection :has_one,     :config
 | Argumento | Descripción |
 |-----------|-------------|
 | `model_relation_type` | Tipo de asociación AR: `:has_many`, `:belongs_to`, `:has_one`, `:has_and_belongs_to_many`. |
-| `*names`  | Nombres de la asociación tal como están definidos en el modelo. |
+| `*names`  | Nombre de la asociación o cualquier método del modelo que retorne registros. |
+
+**Diferencia clave con `flow_field`:** si declarás una relación con `flow_field :tasks`, el serializador vuelca la colección completa sin filtros. Con `flow_connection :has_many, :tasks`, el serializador mira los `_flow_fields` de `Task` y solo serializa esos campos — respetando el contrato del DSL en cascada:
+
+```ruby
+# Task tiene flow_field :id, :title declarados
+# Con flow_connection → { id: 1, title: "Setup DB" }
+# Con flow_field      → todos los atributos de Task, sin filtro
+```
 
 ### `flow_all_attributes`
 
@@ -434,9 +487,11 @@ Representa una asociación registrada con `flow_connection`.
 
 Objeto de configuración global accesible vía `ActiveFlow.configuration`.
 
-| Atributo       | Default | Descripción                                                   |
-|----------------|---------|---------------------------------------------------------------|
-| `auto_include` | `false` | Si es `true`, todos los modelos AR incluyen `Flowable`.      |
+| Atributo            | Default                   | Descripción |
+|---------------------|---------------------------|-------------|
+| `auto_include`      | `false`                   | Si es `true`, todos los modelos AR incluyen `Flowable`. |
+| `routes_namespace`  | `"flow"`                  | Namespace de rutas para recursos sin `namespace` explícito en `with`. |
+| `base_controller`   | `"ActionController::API"` | Controller base para recursos sin `base_controller` explícito en `with`. |
 
 ---
 

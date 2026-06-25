@@ -16,7 +16,8 @@ module ActiveFlow
     end
 
     def permitted_params
-      @permitted_params ||= model._flow_fields.map(&:name) - [:id]
+      column_names = model.column_names.map(&:to_sym)
+      @permitted_params ||= model._flow_fields.map(&:name).select { |f| column_names.include?(f) } - [:id]
     end
   end
 

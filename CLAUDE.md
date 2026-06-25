@@ -86,14 +86,14 @@ end
 
 `with` acepta `base_controller:` y `namespace:` de forma independiente (podés pasar uno o ambos). Usa `@current_base_controller` y `@current_namespace` con guardado/restauración en `ensure` para soportar bloques anidados. `register` dentro del bloque toma esos valores; fuera del bloque caen al default de `configuration`.
 
-`router.rb` agrupa los recursos por namespace antes de dibujar las rutas:
+`router.rb` agrupa los recursos por namespace antes de dibujar las rutas. Excluye `new` y `edit` porque la gema apunta a APIs, no a apps que renderizan formularios HTML:
 
 ```ruby
 ActiveFlow.resources
   .group_by { |_, resource| resource.namespace || ActiveFlow.configuration.routes_namespace }
   .each do |ns, pairs|
     scope path: ns, module: "active_flow" do
-      pairs.each { |resource_name, _| resources resource_name }
+      pairs.each { |resource_name, _| resources resource_name, except: %i[new edit] }
     end
   end
 ```
@@ -106,9 +106,54 @@ ActiveFlow.const_set("ProjectsController", Class.new(base))
 
 Esto permite que el usuario reabra el controller en `app/controllers/active_flow/projects_controller.rb` y agregue concerns sin modificar la gema.
 
+### Paginado en `index`
+
+El `index` pagina solo cuando el request incluye `page` y `page_size`. Sin esos params devuelve el array plano sin cambios.
+
+```ruby
+return render json: Serializer.to_service_json(resource_class.all, scope: flow_scope) unless params[:page].present? && params[:page_size].present?
+```
+
+Con params: ejecuta `SELECT COUNT(*)` para el total y `OFFSET/LIMIT` para la página. Respuesta:
+
+```json
+{ "data": [...], "meta": { "page": 1, "page_size": 25, "total": 80, "total_pages": 4 } }
+```
+
+`resource_class.all` es una `Relation` lazy — no carga registros en memoria hasta el `OFFSET/LIMIT`.
+
 ### Hook `flow_before_action` en el modelo
 
 El controller llama `resource_class.flow_before_action(action_name, self)` antes de cada acción si el modelo responde al método. Es opt-in: si el modelo no lo define, se ignora.
+
+### `flow_field` acepta métodos, no solo columnas
+
+El serializador usa `public_send` para leer valores, por lo que `flow_field` puede declarar cualquier método del modelo — no solo columnas AR. Los métodos calculados aparecen en la respuesta pero quedan excluidos de `permitted_params` automáticamente.
+
+`permitted_params` en `Resource` filtra por `model.column_names`:
+
+```ruby
+column_names = model.column_names.map(&:to_sym)
+model._flow_fields.map(&:name).select { |f| column_names.include?(f) } - [:id]
+```
+
+### `flow_field` vs `flow_connection` para relaciones
+
+Aunque `flow_field` acepta cualquier método, **no debe usarse para relaciones** — si se declara `flow_field :tasks`, el serializador vuelca la colección AR completa sin filtros ni DSL.
+
+`flow_connection` en cambio usa `build_assoc_hash`, que respeta los `_flow_fields` declarados en el modelo asociado:
+
+```ruby
+def build_assoc_hash(record)
+  klass = record.class
+  return { id: record.id } unless klass.respond_to?(:_flow_fields) && klass._flow_fields.any?
+  klass._flow_fields.each_with_object({ id: record.id }) do |field, h|
+    h[field.name] = record.public_send(field.name)
+  end
+end
+```
+
+Esto garantiza que la serialización en cascada respete el contrato del DSL en cada modelo. `flow_connection` también puede declarar métodos que no son asociaciones AR estándar, siempre que retornen registros.
 
 ## Configuración en la app consumidora
 

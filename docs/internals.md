@@ -272,6 +272,90 @@ Infiere el tipo de un campo desde `columns_hash` de AR. Fallback a `:unknown`.
 
 ---
 
+## `router.rb`
+
+Dibuja las rutas RESTful para cada recurso registrado. Se inyecta en `routes_reloader.paths` desde el Railtie (ver decisión de diseño en CLAUDE.md).
+
+### Lógica de agrupación
+
+Los recursos se agrupan por namespace antes de dibujar las rutas, de modo que todos los recursos del mismo namespace queden bajo un solo `scope`:
+
+```ruby
+ActiveFlow.resources
+  .group_by { |_, resource| resource.namespace || ActiveFlow.configuration.routes_namespace }
+  .each do |ns, pairs|
+    scope path: ns, module: "active_flow" do
+      pairs.each { |resource_name, _| resources resource_name, except: %i[new edit] }
+    end
+  end
+```
+
+`new` y `edit` se excluyen porque devuelven formularios HTML — no tienen sentido en una API.
+
+### Rutas generadas
+
+Para un recurso registrado sin `with`, usa el `routes_namespace` del singleton de configuración (default `"flow"`):
+
+```ruby
+# app/flow/resources.rb
+ActiveFlow.register :project
+
+# Rutas generadas:
+# GET    /flow/projects       → ActiveFlow::ProjectsController#index
+# POST   /flow/projects       → ActiveFlow::ProjectsController#create
+# GET    /flow/projects/:id   → ActiveFlow::ProjectsController#show
+# PATCH  /flow/projects/:id   → ActiveFlow::ProjectsController#update
+# PUT    /flow/projects/:id   → ActiveFlow::ProjectsController#update
+# DELETE /flow/projects/:id   → ActiveFlow::ProjectsController#destroy
+```
+
+### Configuración con `ActiveFlow.with`
+
+`with` permite sobreescribir namespace y controller base por grupo de recursos:
+
+```ruby
+# app/flow/resources.rb
+
+# Bajo /admin_api/v1, heredando autenticación del AdminBaseController
+ActiveFlow.with base_controller: "AdminApi::AdminBaseController", namespace: "admin_api/v1" do
+  register :admin_user
+  register :case_config
+end
+
+# Bajo /api/v1, con otro controller base
+ActiveFlow.with base_controller: "Api::V1::BaseController", namespace: "api/v1" do
+  register :project
+end
+```
+
+Resultado para el primer bloque:
+```
+GET    /admin_api/v1/admin_users       → ActiveFlow::AdminUsersController#index
+POST   /admin_api/v1/admin_users       → ActiveFlow::AdminUsersController#create
+GET    /admin_api/v1/admin_users/:id   → ActiveFlow::AdminUsersController#show
+...
+```
+
+`ActiveFlow::AdminUsersController` hereda de `AdminApi::AdminBaseController`, por lo que pasa por todos sus `before_action` (autenticación, validación de utility, etc.).
+
+### Namespace vs base_controller
+
+Son independientes — podés pasarlos juntos o por separado:
+
+```ruby
+# Solo namespace distinto, controller base del default de configuración
+ActiveFlow.with namespace: "internal/v1" do
+  register :audit_log
+end
+
+# Solo controller base distinto, namespace del default de configuración
+ActiveFlow.with base_controller: "PublicController" do
+  register :status
+end
+```
+
+---
+
 ## `configuration.rb`
 
 Objeto de configuración global de la gema con patrón singleton.
@@ -282,9 +366,11 @@ ActiveFlow.configure do |config|
 end
 ```
 
-| Atributo       | Default | Descripción |
-|----------------|---------|-------------|
-| `auto_include` | `false` | Si es `true`, todos los modelos AR incluyen `Flowable` al cargar Rails |
+| Atributo            | Default                  | Descripción |
+|---------------------|--------------------------|-------------|
+| `auto_include`      | `false`                  | Si es `true`, todos los modelos AR incluyen `Flowable` al cargar Rails |
+| `routes_namespace`  | `"flow"`                 | Prefijo de ruta para recursos registrados sin `namespace` explícito |
+| `base_controller`   | `"ActionController::API"`| Controller base para recursos registrados sin `base_controller` explícito |
 
 `ActiveFlow.configuration` devuelve la instancia singleton con lazy init. `ActiveFlow.configure` es el bloque estándar que la expone.
 
