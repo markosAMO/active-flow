@@ -11,7 +11,6 @@ require "active_flow/flowable"
 require "active_flow/serializer"
 require "active_flow/resource"
 require "active_flow/resource_controller"
-require "active_flow/routing"
 require "active_flow/railtie" if defined?(Rails)
 
 module ActiveFlow
@@ -20,12 +19,36 @@ module ActiveFlow
       @resources ||= {}
     end
 
-    def register(model, &block)
+    def with(base_controller: nil, namespace: nil, &block)
+      previous_controller = @current_base_controller
+      previous_namespace  = @current_namespace
+      @current_base_controller = base_controller if base_controller
+      @current_namespace       = namespace       if namespace
+      instance_eval(&block)
+    ensure
+      @current_base_controller = previous_controller
+      @current_namespace       = previous_namespace
+    end
+
+    def register(model_or_name, &block)
       registration = ResourceRegistration.new
       registration.instance_eval(&block) if block_given?
-      resource = Resource.new(model, scope: registration.scope)
+      model_name = case model_or_name
+                   when Class  then model_or_name.name
+                   when Symbol then model_or_name.to_s.camelize
+                   when String then model_or_name.camelize
+                   end
+      resource = Resource.new(
+        model_name,
+        scope:           registration.scope,
+        base_controller: @current_base_controller,
+        namespace:       @current_namespace
+      )
       resources[resource.resource_name] = resource
-      generate_controller(resource)
+    end
+
+    def generate_all_controllers
+      resources.each_value { |resource| generate_controller(resource) }
     end
 
     private
@@ -33,7 +56,11 @@ module ActiveFlow
     def generate_controller(resource)
       return if ActiveFlow.const_defined?(resource.controller_name)
 
-      klass = Class.new(ResourceController)
+      base_name = resource.base_controller || configuration.base_controller
+      base = base_name.constantize
+
+      klass = Class.new(base)
+      klass.include(ResourceActions) unless klass.ancestors.include?(ResourceActions)
       klass.instance_variable_set(:@flow_resource, resource)
       klass.define_singleton_method(:flow_resource) { @flow_resource }
       ActiveFlow.const_set(resource.controller_name, klass)

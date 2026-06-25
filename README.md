@@ -50,9 +50,11 @@ ActiveFlow.configure do |config|
 end
 ```
 
-| Opción         | Tipo    | Default | Descripción |
-|----------------|---------|---------|-------------|
-| `auto_include` | Boolean | `false` | Incluye `ActiveFlow::Flowable` en **todos** los modelos AR al cargar Rails. |
+| Opción              | Tipo    | Default                  | Descripción |
+|---------------------|---------|--------------------------|-------------|
+| `auto_include`      | Boolean | `false`                  | Incluye `ActiveFlow::Flowable` en **todos** los modelos AR al cargar Rails. |
+| `routes_namespace`  | String  | `"flow"`                 | Namespace bajo el cual se montan las rutas generadas automáticamente. |
+| `base_controller`   | String  | `"ActionController::API"` | Clase base de la que heredan todos los controllers generados. |
 
 ---
 
@@ -62,45 +64,78 @@ ActiveFlow puede generar controladores CRUD automáticamente para cualquier mode
 
 ### Setup
 
-Creá un archivo por modelo en `app/flow/`:
+Creá los archivos de registro en `app/flow/`. Podés tener un archivo por modelo o uno solo con todos los registros:
 
 ```ruby
-# app/flow/project_flow.rb
-ActiveFlow.register Project do
+# app/flow/resources.rb  ← archivo único recomendado
+ActiveFlow.register "Project" do
   scope :summary  # scope por defecto para serializar, opcional
 end
+
+ActiveFlow.register "AdminUser"
+ActiveFlow.register "Task"
 ```
 
-Montá las rutas en `config/routes.rb`:
+> **Importante:** pasá el nombre del modelo como **String** (o Symbol), nunca como constante directa.
+> Rails 7 con Zeitwerk no permite resolver constantes de modelos durante los initializers de boot.
+> La gema resuelve la constante con `constantize` de forma lazy, cuando llega la primera request.
+
+La gema registra `app/flow/` como zona ignorada por Zeitwerk — no necesitás ninguna configuración extra.
+
+### Agrupación por controller base y namespace
+
+Usá `ActiveFlow.with` para registrar varios modelos bajo un mismo controller base y/o namespace de rutas. Podés pasar uno, el otro, o ambos:
 
 ```ruby
-Rails.application.routes.draw do
-  active_flow_routes              # monta en /flow
-  active_flow_routes path: "api"  # o con path custom → /api
+# app/flow/resources.rb
+ActiveFlow.with base_controller: "Api::V1::BaseController", namespace: "api/v1" do
+  register "Project"   # → /api/v1/projects
+  register "Task"      # → /api/v1/tasks
+end
+
+ActiveFlow.with base_controller: "Admin::BaseController", namespace: "admin" do
+  register "AdminUser" # → /admin/admin_users
+end
+
+# sin grupo → usa los defaults de configuration
+register "PublicReport"  # → /flow/public_reports
+```
+
+Los defaults globales se configuran en el initializer:
+
+```ruby
+# config/initializers/active_flow.rb
+ActiveFlow.configure do |config|
+  config.routes_namespace = "flow"             # default para recursos sin namespace explícito
+  config.base_controller  = "ApplicationController"  # default para recursos sin base_controller explícito
 end
 ```
+
+Las rutas se generan **automáticamente** al bootear — no necesitás tocar `routes.rb`.
 
 ### Rutas generadas
 
-Para cada modelo registrado se generan 5 rutas RESTful bajo el path configurado:
+Para cada modelo registrado se generan 5 rutas RESTful bajo su namespace:
 
 ```
-GET    /flow/projects          → index
-GET    /flow/projects/:id      → show
-POST   /flow/projects          → create
-PATCH  /flow/projects/:id      → update
-DELETE /flow/projects/:id      → destroy
+GET    /api/v1/projects          → index
+GET    /api/v1/projects/:id      → show
+POST   /api/v1/projects          → create
+PATCH  /api/v1/projects/:id      → update
+DELETE /api/v1/projects/:id      → destroy
 ```
 
 ### Respuestas JSON
 
 | Acción    | Formato de respuesta |
 |-----------|----------------------|
-| `index`   | `{ nodes: [...], edges: [] }` |
-| `show`    | `{ nodes: [...], edges: [...] }` con conexiones |
+| `index`   | array de objetos JSON planos |
+| `show`    | objeto JSON plano con relaciones anidadas |
 | `create`  | registro creado serializado, status `201` |
 | `update`  | registro actualizado serializado, status `200` |
 | `destroy` | sin body, status `204` |
+
+Todos usan `to_service_json` — formato plano anidado, no React Flow.
 
 En caso de error de validación (`create` / `update`):
 
@@ -118,16 +153,40 @@ Los parámetros permitidos se derivan automáticamente de los `flow_field` decla
 
 ### Controller base
 
-El controller generado hereda de `ActiveFlow::ResourceController < ActionController::API`. Si necesitás autenticación u otros concerns, podés abrir el controller generado en tu app:
+Cada controller generado hereda de la clase configurada en `base_controller` (o la especificada en el bloque `with`) e incluye automáticamente `ActiveFlow::ResourceActions` con todas las acciones CRUD.
+
+Si necesitás sobrescribir una acción o agregar concerns puntuales en un modelo específico, podés reabrir el controller generado:
 
 ```ruby
 # app/controllers/active_flow/projects_controller.rb
 module ActiveFlow
   class ProjectsController < ActiveFlow::ResourceController
     before_action :authenticate_user!
+
+    def index
+      # lógica custom
+    end
   end
 end
 ```
+
+### Hook `flow_before_action`
+
+Si el modelo define el método de clase `flow_before_action`, el controller lo invoca antes de cada acción. Es útil para autorización, logging u otras validaciones por modelo:
+
+```ruby
+class Project < ApplicationRecord
+  include ActiveFlow::Flowable
+
+  def self.flow_before_action(action, controller)
+    unless controller.current_user&.admin?
+      controller.render json: { error: "Forbidden" }, status: :forbidden
+    end
+  end
+end
+```
+
+El método recibe el nombre de la acción como Symbol (`:index`, `:show`, etc.) y el controller como segundo argumento, dando acceso a `request`, `params`, `render`, etc. Si el modelo no define el método, se ignora.
 
 ---
 

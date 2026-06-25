@@ -1,21 +1,28 @@
 module ActiveFlow
   class Resource
-    attr_reader :model, :scope, :permitted_params, :resource_name, :controller_name
+    attr_reader :model_name, :scope, :base_controller, :namespace, :resource_name, :controller_name
 
-    def initialize(model, scope: nil)
-      @model            = model
-      @scope            = scope
-      @resource_name    = model.name.underscore.pluralize.to_sym
-      @controller_name  = "#{model.name.pluralize}Controller"
-      @permitted_params = model._flow_fields.map(&:name) - [:id]
+    def initialize(model_name, scope: nil, base_controller: nil, namespace: nil)
+      @model_name      = model_name.to_s
+      @scope           = scope
+      @base_controller = base_controller
+      @namespace       = namespace
+      @resource_name   = @model_name.underscore.pluralize.to_sym
+      @controller_name = "#{@model_name.pluralize}Controller"
+    end
+
+    def model
+      @model ||= model_name.constantize
+    end
+
+    def permitted_params
+      @permitted_params ||= model._flow_fields.map(&:name) - [:id]
     end
   end
 
   class ResourceRegistration
-    attr_reader :scope
-
-    def scope(name)
-      @scope = name.to_sym
+    def scope(name = nil)
+      name ? @scope = name.to_sym : @scope
     end
   end
 end
